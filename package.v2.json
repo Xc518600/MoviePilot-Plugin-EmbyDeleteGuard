@@ -3,13 +3,14 @@
     "name": "Emby删除兜底清理",
     "description": "监听媒体服务器删除事件，延迟复查并兜底清理残留媒体、刮削文件、空目录和下载器任务。默认安全报告模式。",
     "labels": "媒体库,清理,下载管理",
-    "version": "1.1",
+    "version": "1.2",
     "icon": "delete_sweep.png",
     "author": "老公",
     "level": 1,
     "v2": true,
     "release": true,
     "history": {
+      "v1.2": "新增：插件页面历史记录，保存最近漏删复查报告，展示残留数量、路径、摘要和安全报告状态。",
       "v1.1": "新增：检测到漏删时发送明确通知，并增加独立开关 notify_on_residue。",
       "v1.0": "新增：监听 Emby/Jellyfin/Plex 删除类 Webhook，延迟复查清理媒体库残留文件、刮削文件、空目录及下载器任务，默认只报告不删除。"
     }
