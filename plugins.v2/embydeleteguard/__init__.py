@@ -18,7 +18,7 @@ class EmbyDeleteGuard(_PluginBase):
     plugin_name = "Emby删除兜底清理"
     plugin_desc = "监听媒体服务器删除事件，延迟复查并兜底清理残留媒体、刮削文件、空目录和下载器任务。默认安全报告模式。"
     plugin_icon = "delete_sweep.png"
-    plugin_version = "1.1"
+    plugin_version = "1.2"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "embydeleteguard_"
@@ -59,6 +59,8 @@ class EmbyDeleteGuard(_PluginBase):
     _path_mappings = ""
     _custom_scrap_extensions = ""
     _dedupe_seconds = 300
+    _history_limit = 100
+    _history: List[Dict[str, Any]] = []
 
     _timers: List[threading.Timer] = []
     _recent_keys: Dict[str, float] = {}
@@ -83,6 +85,9 @@ class EmbyDeleteGuard(_PluginBase):
             self._path_mappings = config.get("path_mappings") or ""
             self._custom_scrap_extensions = config.get("custom_scrap_extensions") or ""
             self._dedupe_seconds = int(config.get("dedupe_seconds") or 300)
+            self._history_limit = int(config.get("history_limit") or 100)
+            history = config.get("history") or []
+            self._history = history if isinstance(history, list) else []
 
         if self._enabled:
             mode = "只报告" if self._dry_run else "自动清理"
@@ -104,14 +109,79 @@ class EmbyDeleteGuard(_PluginBase):
         return []
 
     def get_page(self) -> List[dict]:
+        """展示最近漏删复查历史。"""
+        history = list(self._history or [])
+        rows = []
+        for idx, item in enumerate(history[: self._history_limit], start=1):
+            rows.append({
+                "component": "tr",
+                "content": [
+                    {"component": "td", "text": str(idx)},
+                    {"component": "td", "text": item.get("time", "")},
+                    {"component": "td", "text": item.get("item_name", "")},
+                    {"component": "td", "text": item.get("path", "")},
+                    {"component": "td", "text": str(item.get("media_count", 0))},
+                    {"component": "td", "text": str(item.get("scrap_count", 0))},
+                    {"component": "td", "text": str(item.get("other_count", 0))},
+                    {"component": "td", "text": str(item.get("empty_dir_count", 0))},
+                    {"component": "td", "text": str(item.get("torrent_count", 0))},
+                    {"component": "td", "text": "是" if item.get("dry_run") else "否"},
+                    {"component": "td", "text": item.get("summary", "")},
+                ]
+            })
+
+        if not rows:
+            return [{
+                "component": "VAlert",
+                "props": {
+                    "type": "info",
+                    "variant": "tonal",
+                    "text": "暂无漏删复查记录。删除媒体后，插件会在延迟复查完成时把最近记录保存到这里。"
+                }
+            }]
+
         return [
             {
                 "component": "VAlert",
                 "props": {
                     "type": "info",
                     "variant": "tonal",
-                    "text": "本插件监听媒体服务器删除类 Webhook，延迟复查原清理插件是否漏删。默认只报告不删除；如需自动删除，请在设置中关闭安全报告模式并开启对应清理项。"
+                    "text": f"最近漏删复查记录：{len(history[: self._history_limit])} 条。安全报告模式下只记录和通知，不会删除文件或种子。"
                 }
+            },
+            {
+                "component": "VTable",
+                "props": {
+                    "hover": True,
+                    "density": "compact",
+                    "fixed-header": True,
+                    "style": {"max-height": "620px", "overflow-y": "auto"}
+                },
+                "content": [
+                    {
+                        "component": "thead",
+                        "content": [{
+                            "component": "tr",
+                            "content": [
+                                {"component": "th", "text": "#"},
+                                {"component": "th", "text": "时间"},
+                                {"component": "th", "text": "媒体"},
+                                {"component": "th", "text": "路径"},
+                                {"component": "th", "text": "媒体"},
+                                {"component": "th", "text": "刮削/字幕"},
+                                {"component": "th", "text": "其他"},
+                                {"component": "th", "text": "空目录"},
+                                {"component": "th", "text": "种子"},
+                                {"component": "th", "text": "只报告"},
+                                {"component": "th", "text": "摘要"},
+                            ]
+                        }]
+                    },
+                    {
+                        "component": "tbody",
+                        "content": rows
+                    }
+                ]
             }
         ]
 
@@ -236,6 +306,11 @@ class EmbyDeleteGuard(_PluginBase):
                             },
                             {
                                 "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [{"component": "VTextField", "props": {"model": "history_limit", "label": "历史记录保留条数", "type": "number", "placeholder": "100"}}]
+                            },
+                            {
+                                "component": "VCol",
                                 "props": {"cols": 12},
                                 "content": [{
                                     "component": "VTextarea",
@@ -270,6 +345,8 @@ class EmbyDeleteGuard(_PluginBase):
             "max_scan_files": 2000,
             "custom_scrap_extensions": "",
             "dedupe_seconds": 300,
+            "history_limit": 100,
+            "history": [],
         }
 
     def stop_service(self):
@@ -550,6 +627,15 @@ class EmbyDeleteGuard(_PluginBase):
         text = "\n".join(lines)
         logger.info(text)
         has_residue = bool(media_count or scrap_count or other_count or empty_count or torrent_count)
+        self._save_history_record(
+            path=path,
+            item_name=item_name,
+            event_type=event_type,
+            channel=channel,
+            result=result,
+            actions=actions,
+            has_residue=has_residue,
+        )
         if has_residue:
             logger.warning(f"Emby删除兜底清理检测到漏删：{item_name}，媒体 {media_count}，刮削/字幕 {scrap_count}，其他 {other_count}，空目录 {empty_count}，种子 {torrent_count}")
 
@@ -563,6 +649,90 @@ class EmbyDeleteGuard(_PluginBase):
                 self.post_message(mtype=NotificationType.Plugin, title=notify_title, text=text)
             except Exception as e:
                 logger.warning(f"发送通知失败：{e}")
+
+    def _save_history_record(self, path: Path, item_name: str, event_type: str, channel: str,
+                             result: Dict[str, Any], actions: List[str], has_residue: bool):
+        """保存最近复查记录到插件配置，供插件页面查看。"""
+        try:
+            media_files = [str(p) for p in (result.get("media_files") or [])]
+            scrap_files = [str(p) for p in (result.get("scrap_files") or [])]
+            other_files = [str(p) for p in (result.get("other_files") or [])]
+            empty_dirs = [str(p) for p in (result.get("empty_dirs") or [])]
+            torrents = result.get("torrents") or []
+            torrent_items = [
+                {
+                    "downloader": t.get("downloader"),
+                    "name": t.get("name"),
+                    "hash": t.get("hash") or t.get("id"),
+                    "save_path": t.get("save_path"),
+                    "content_path": t.get("content_path"),
+                }
+                for t in torrents[:20]
+            ]
+            summary_parts = []
+            if media_files:
+                summary_parts.append(f"媒体{len(media_files)}")
+            if scrap_files:
+                summary_parts.append(f"刮削/字幕{len(scrap_files)}")
+            if other_files:
+                summary_parts.append(f"其他{len(other_files)}")
+            if empty_dirs:
+                summary_parts.append(f"空目录{len(empty_dirs)}")
+            if torrent_items:
+                summary_parts.append(f"种子{len(torrent_items)}")
+            summary = "，".join(summary_parts) if summary_parts else "无残留"
+            record = {
+                "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+                "item_name": item_name,
+                "event_type": event_type,
+                "channel": channel,
+                "path": str(path),
+                "has_residue": has_residue,
+                "media_count": len(media_files),
+                "scrap_count": len(scrap_files),
+                "other_count": len(other_files),
+                "empty_dir_count": len(empty_dirs),
+                "torrent_count": len(torrents),
+                "dry_run": bool(self._dry_run),
+                "summary": summary,
+                "media_files": media_files[:20],
+                "scrap_files": scrap_files[:30],
+                "other_files": other_files[:20],
+                "empty_dirs": empty_dirs[:20],
+                "torrents": torrent_items,
+                "actions": list(actions or [])[:20],
+            }
+            with self._lock:
+                self._history.insert(0, record)
+                self._history = self._history[: max(1, int(self._history_limit or 100))]
+            # 保存到插件配置；避免把运行态对象写入配置，只写基础字段和历史。
+            config = self.get_config() or {}
+            if not isinstance(config, dict):
+                config = {}
+            config.update({
+                "enabled": self._enabled,
+                "notify": self._notify,
+                "notify_on_residue": self._notify_on_residue,
+                "dry_run": self._dry_run,
+                "delay_seconds": self._delay_seconds,
+                "watch_servers": self._watch_servers,
+                "allowed_roots": self._allowed_roots,
+                "path_mappings": self._path_mappings,
+                "clean_scrap": self._clean_scrap,
+                "clean_empty_dirs": self._clean_empty_dirs,
+                "clean_media": self._clean_media,
+                "delete_torrents": self._delete_torrents,
+                "delete_torrent_files": self._delete_torrent_files,
+                "emit_download_deleted_event": self._emit_download_deleted_event,
+                "max_scan_files": self._max_scan_files,
+                "custom_scrap_extensions": self._custom_scrap_extensions,
+                "dedupe_seconds": self._dedupe_seconds,
+                "history_limit": self._history_limit,
+                "history": self._history,
+            })
+            self.update_config(config)
+        except Exception as e:
+            logger.warning(f"保存漏删历史记录失败：{e}")
 
     def _extract_item_path(self, event_info: WebhookEventInfo) -> Optional[str]:
         path = getattr(event_info, "item_path", None)
