@@ -18,7 +18,7 @@ class EmbyDeleteGuard(_PluginBase):
     plugin_name = "Emby删除兜底清理"
     plugin_desc = "监听媒体服务器删除事件，延迟复查并兜底清理残留媒体、刮削文件、空目录和下载器任务。默认安全报告模式。"
     plugin_icon = "delete_sweep.png"
-    plugin_version = "1.0"
+    plugin_version = "1.1"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "embydeleteguard_"
@@ -44,6 +44,7 @@ class EmbyDeleteGuard(_PluginBase):
 
     _enabled = False
     _notify = True
+    _notify_on_residue = True
     _dry_run = True
     _delay_seconds = 60
     _watch_servers = "emby,jellyfin,plex"
@@ -67,6 +68,7 @@ class EmbyDeleteGuard(_PluginBase):
         if config:
             self._enabled = bool(config.get("enabled", False))
             self._notify = bool(config.get("notify", True))
+            self._notify_on_residue = bool(config.get("notify_on_residue", True))
             self._dry_run = bool(config.get("dry_run", True))
             self._delay_seconds = int(config.get("delay_seconds") or 60)
             self._watch_servers = config.get("watch_servers") or "emby,jellyfin,plex"
@@ -143,6 +145,14 @@ class EmbyDeleteGuard(_PluginBase):
                                 "content": [{
                                     "component": "VSwitch",
                                     "props": {"model": "notify", "label": "发送通知"}
+                                }]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [{
+                                    "component": "VSwitch",
+                                    "props": {"model": "notify_on_residue", "label": "检测到漏删时通知", "hint": "复查发现残留文件、空目录或种子时主动通知"}
                                 }]
                             },
                             {
@@ -246,6 +256,7 @@ class EmbyDeleteGuard(_PluginBase):
             "enabled": False,
             "dry_run": True,
             "notify": True,
+            "notify_on_residue": True,
             "delay_seconds": 60,
             "watch_servers": "emby,jellyfin,plex",
             "allowed_roots": "",
@@ -538,9 +549,18 @@ class EmbyDeleteGuard(_PluginBase):
             lines.extend([f"- {a}" for a in actions[:8]])
         text = "\n".join(lines)
         logger.info(text)
-        if self._notify and (media_count or scrap_count or other_count or empty_count or torrent_count or not self._dry_run):
+        has_residue = bool(media_count or scrap_count or other_count or empty_count or torrent_count)
+        if has_residue:
+            logger.warning(f"Emby删除兜底清理检测到漏删：{item_name}，媒体 {media_count}，刮削/字幕 {scrap_count}，其他 {other_count}，空目录 {empty_count}，种子 {torrent_count}")
+
+        should_notify = bool(self._notify and (
+            (has_residue and self._notify_on_residue)
+            or (not has_residue and not self._dry_run)
+        ))
+        if should_notify:
             try:
-                self.post_message(mtype=NotificationType.Plugin, title=title, text=text)
+                notify_title = "Emby删除兜底清理：检测到漏删" if has_residue else title
+                self.post_message(mtype=NotificationType.Plugin, title=notify_title, text=text)
             except Exception as e:
                 logger.warning(f"发送通知失败：{e}")
 
